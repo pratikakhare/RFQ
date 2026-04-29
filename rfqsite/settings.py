@@ -4,11 +4,18 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 SECRET_KEY = 'django-insecure-replace-this-in-production'
-DEBUG = True
 
-ALLOWED_HOSTS = [ "rfq-99w5.onrender.com",
-    "localhost",
-    "127.0.0.1"]
+DEBUG = False
+
+ALLOWED_HOSTS = [
+    "rfq-99w5.onrender.com",
+    "127.0.0.1",
+    "localhost"
+]
+
+CSRF_TRUSTED_ORIGINS = [
+    "https://rfq-99w5.onrender.com"
+]
 
 INSTALLED_APPS = [
     'django.contrib.admin',
@@ -22,6 +29,7 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
+    'whitenoise.middleware.WhiteNoiseMiddleware',   # add this
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -65,6 +73,13 @@ USE_I18N = True
 USE_TZ = True
 
 STATIC_URL = '/static/'
-STATICFILES_DIRS = [BASE_DIR / 'static']
+
+STATICFILES_DIRS = [
+    BASE_DIR / 'static'
+]
+
+STATIC_ROOT = BASE_DIR / 'staticfiles'
+
+STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
