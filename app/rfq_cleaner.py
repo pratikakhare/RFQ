@@ -1,6 +1,6 @@
-import os
 import re
-import tempfile
+from io import BytesIO
+
 import pandas as pd
 from dateutil import parser
 
@@ -109,10 +109,21 @@ MAPPING_YN = {
     'NO': 'NO'
 }
 
+EMAIL_REGEX = re.compile(r'^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$')
+WHITESPACE_RE = re.compile(r'\s+')
+DIGIT_PREFIX_RE = re.compile(r'^\d+\s*[\.\)]\s*')
+ITEM_SPLIT_RE = re.compile(r'(\d+)\.\s*(.*?)(?=\s*\d+\.|$)')
+
+VALID_SUBMISSION_CATEGORY_PREFIXES = sorted(VALID_SUBMISSION_CATEGORY, key=len, reverse=True)
+VALID_SUB_CATEGORY_PREFIXES = sorted(VALID_SUB_CATEGORY, key=len, reverse=True)
+VALID_ERROR_CATEGORY_PREFIXES = sorted(VALID_ERROR_CATEGORY, key=len, reverse=True)
+VALID_STATUS_OUTCOME_PREFIXES = sorted(VALID_STATUS_OUTCOME, key=len, reverse=True)
+
 
 # =========================================================
 # MASTER CLEANING FUNCTIONS
 # =========================================================
+
 
 def clean_email(email):
     if pd.isna(email) or not email:
@@ -122,12 +133,11 @@ def clean_email(email):
     email_str = re.sub(r'[\n\r\t\xa0]', '', email_str)
     email_candidates = re.split(r'[;,|]+', email_str)
 
-    if len([e for e in email_candidates if e.strip()]) > 1:
+    if len([e for e in email_candidates if e.strip()]) != 1:
         return ''
 
     email = email_candidates[0].strip().strip('.,;').replace(' ', '')
-    email_regex = r'^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$'
-    return email if re.match(email_regex, email) else ''
+    return email if EMAIL_REGEX.match(email) else ''
 
 
 def parse_messy_date(x):
@@ -137,7 +147,7 @@ def parse_messy_date(x):
     x = re.sub(r'IST', '', x, flags=re.IGNORECASE)
     x = re.sub(r'[()]', '', x)
     x = x.replace('//', '/')
-    x = re.sub(r'\s+', ' ', x).strip()
+    x = WHITESPACE_RE.sub(' ', x).strip()
     try:
         return parser.parse(x, fuzzy=True).strftime('%m/%d/%Y')
     except Exception:
@@ -148,48 +158,46 @@ def clean_compliant(x):
     if pd.isna(x):
         return ''
     x = str(x).strip().upper()
-    x = re.sub(r'^\d+\s*[\.\)]\s*', '', x)
-    x = re.sub(r'\s+', ' ', x)
+    x = DIGIT_PREFIX_RE.sub('', x)
+    x = WHITESPACE_RE.sub(' ', x)
     if 'REVISED' in x:
         return 'YES - REVISED RATES'
-    elif 'MAINTAIN' in x:
+    if 'MAINTAIN' in x:
         return 'YES - MAINTAIN RATES'
-    elif x == 'NO' or ' NO ' in f' {x} ':
+    if x == 'NO' or ' NO ' in f' {x} ':
         return 'NO'
     return ''
 
 
-def multiline_cleaner(x, valid_set):
+def multiline_cleaner(x, valid_set, valid_prefixes):
     if pd.isna(x):
         return ''
-    x = str(x).upper().strip()
+    x = str(x).upper().replace('\xa0', ' ')
+    x = WHITESPACE_RE.sub(' ', x).strip()
     if x == '':
         return ''
-    x = re.sub(r'[\xa0]', ' ', x)
-    x = re.sub(r'\s+', ' ', x).strip()
-    starts_valid = any(
-        x.startswith(v)
-        for v in sorted(valid_set, key=len, reverse=True)
-    )
-    if starts_valid and not re.match(r'^\d+\.', x):
+
+    if any(x.startswith(prefix) for prefix in valid_prefixes) and not re.match(r'^\d+\.', x):
         x = '1. ' + x
+
     x = re.sub(r'(\d+)\.', r' \1. ', x)
-    x = re.sub(r'\s+', ' ', x).strip()
-    matches = list(re.finditer(r'(\d+)\.\s*(.*?)(?=\s*\d+\.|$)', x))
+    x = WHITESPACE_RE.sub(' ', x).strip()
+
+    matches = ITEM_SPLIT_RE.finditer(x)
     values = []
-    if matches:
-        for m in matches:
-            val = m.group(2).strip()
-            if val in valid_set:
-                values.append(val)
-    else:
-        if x in valid_set:
-            values.append(x)
+    for match in matches:
+        val = match.group(2).strip()
+        if val in valid_set:
+            values.append(val)
+
+    if not values and x in valid_set:
+        values.append(x)
+
     if not values:
         return ''
+
     values = list(dict.fromkeys(values))
-    cleaned = [f"{i+1}. {v}" for i, v in enumerate(values)]
-    return '\n'.join(cleaned)
+    return '\n'.join(f'{i+1}. {val}' for i, val in enumerate(values))
 
 
 def normalize_month(value):
@@ -214,35 +222,39 @@ def normalize_month(value):
 def clean_rfq_dataframe(df):
     df['GLOBAL/\nNAC'] = df['GLOBAL/\nNAC'].astype(str).str.strip()
     df['NAMED ACCOUNT'] = df['NAMED ACCOUNT'].astype(str).str.strip()
+
     cond1 = ~df['GLOBAL/\nNAC'].isin(['GLOBAL', 'NAC'])
     blank_patterns = ['', '-', ' -', '- ', ' - ']
     cond2 = df['NAMED ACCOUNT'].isin(blank_patterns)
     df.loc[cond1 & cond2, 'GLOBAL/\nNAC'] = 'GLOBAL'
     df.loc[cond1 & ~cond2, 'GLOBAL/\nNAC'] = 'NAC'
+
     df.loc[~df['RFQ HANDLED BY'].isin(VALID_HANDLERS), 'RFQ HANDLED BY'] = ''
-    df['WWA MEMBER EMAIL ID'] = df['WWA MEMBER EMAIL ID'].apply(clean_email)
+    df['WWA MEMBER EMAIL ID'] = df['WWA MEMBER EMAIL ID'].map(clean_email)
+
     for c in DATE_COLUMNS:
-        df[c] = df[c].apply(parse_messy_date)
-    df['MONTH'] = df['MONTH'].apply(normalize_month)
+        df[c] = df[c].map(parse_messy_date)
+
+    df['MONTH'] = df['MONTH'].map(normalize_month)
     df['ENTRY COMPLETE YES / NO'] = (
         df['ENTRY COMPLETE YES / NO']
         .astype(str)
         .str.strip()
         .str.upper()
-        .apply(lambda x: x if x in ['YES', 'NO'] else '')
+        .map(lambda x: x if x in ['YES', 'NO'] else '')
     )
-    df['COMPLIANT (YES/NO)'] = df['COMPLIANT (YES/NO)'].apply(clean_compliant)
-    df['SUBMISSION CATEGORY'] = df['SUBMISSION CATEGORY'].apply(
-        lambda x: multiline_cleaner(x, VALID_SUBMISSION_CATEGORY)
+    df['COMPLIANT (YES/NO)'] = df['COMPLIANT (YES/NO)'].map(clean_compliant)
+    df['SUBMISSION CATEGORY'] = df['SUBMISSION CATEGORY'].map(
+        lambda x: multiline_cleaner(x, VALID_SUBMISSION_CATEGORY, VALID_SUBMISSION_CATEGORY_PREFIXES)
     )
-    df['SUBMISSION SUB-CATEGORY'] = df['SUBMISSION SUB-CATEGORY'].apply(
-        lambda x: multiline_cleaner(x, VALID_SUB_CATEGORY)
+    df['SUBMISSION SUB-CATEGORY'] = df['SUBMISSION SUB-CATEGORY'].map(
+        lambda x: multiline_cleaner(x, VALID_SUB_CATEGORY, VALID_SUB_CATEGORY_PREFIXES)
     )
-    df['ERROR CATEGORY'] = df['ERROR CATEGORY'].apply(
-        lambda x: multiline_cleaner(x, VALID_ERROR_CATEGORY)
+    df['ERROR CATEGORY'] = df['ERROR CATEGORY'].map(
+        lambda x: multiline_cleaner(x, VALID_ERROR_CATEGORY, VALID_ERROR_CATEGORY_PREFIXES)
     )
-    df['STATUS UPDATE/OUTCOME'] = df['STATUS UPDATE/OUTCOME'].apply(
-        lambda x: multiline_cleaner(x, VALID_STATUS_OUTCOME)
+    df['STATUS UPDATE/OUTCOME'] = df['STATUS UPDATE/OUTCOME'].map(
+        lambda x: multiline_cleaner(x, VALID_STATUS_OUTCOME, VALID_STATUS_OUTCOME_PREFIXES)
     )
     df['PENALTY REPORTED Y/N'] = (
         df['PENALTY REPORTED Y/N']
@@ -256,10 +268,8 @@ def clean_rfq_dataframe(df):
 
 
 def process_rfq_file(uploaded_file):
-    with tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx') as temp_file:
-        for chunk in uploaded_file.chunks():
-            temp_file.write(chunk)
-        temp_path = temp_file.name
+    input_bytes = uploaded_file.read()
+    input_buffer = BytesIO(input_bytes)
 
     sheets = [
         'Aseem', 'Sunil', 'Samuel',
@@ -269,30 +279,30 @@ def process_rfq_file(uploaded_file):
     all_data = []
     columns = None
 
-    try:
-        for i, sheet in enumerate(sheets):
-            if i == 0:
-                df = pd.read_excel(temp_path, sheet_name=sheet, header=7)
-                columns = list(df.columns)
-            else:
-                df = pd.read_excel(temp_path, sheet_name=sheet, header=None, skiprows=8)
-                if df.shape[1] < len(columns):
-                    for c in range(df.shape[1], len(columns)):
-                        df[c] = None
-                elif df.shape[1] > len(columns):
-                    df = df.iloc[:, :len(columns)]
-                df.columns = columns
-            df.dropna(how='all', inplace=True)
-            all_data.append(df)
-        df = pd.concat(all_data, ignore_index=True)
-        df = clean_rfq_dataframe(df)
-        output_path = tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx').name
-        df.to_excel(output_path, index=False)
-        with open(output_path, 'rb') as out_file:
-            content = out_file.read()
-    finally:
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
-        if 'output_path' in locals() and os.path.exists(output_path):
-            os.remove(output_path)
-    return content
+    xls = pd.ExcelFile(input_buffer, engine='openpyxl')
+    missing_sheets = [sheet for sheet in sheets if sheet not in xls.sheet_names]
+    if missing_sheets:
+        raise ValueError(f'Missing expected sheet(s): {", ".join(missing_sheets)}')
+
+    for i, sheet in enumerate(sheets):
+        if i == 0:
+            df = xls.parse(sheet_name=sheet, header=7)
+            columns = list(df.columns)
+        else:
+            df = xls.parse(sheet_name=sheet, header=None, skiprows=8)
+            if df.shape[1] < len(columns):
+                for c in range(df.shape[1], len(columns)):
+                    df[c] = None
+            elif df.shape[1] > len(columns):
+                df = df.iloc[:, :len(columns)]
+            df.columns = columns
+
+        df.dropna(how='all', inplace=True)
+        all_data.append(df)
+
+    df = pd.concat(all_data, ignore_index=True)
+    df = clean_rfq_dataframe(df)
+
+    output_buffer = BytesIO()
+    df.to_excel(output_buffer, index=False, engine='openpyxl')
+    return output_buffer.getvalue()
