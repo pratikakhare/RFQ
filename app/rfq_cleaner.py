@@ -1,4 +1,5 @@
 import re
+from functools import lru_cache
 from io import BytesIO
 
 import pandas as pd
@@ -141,6 +142,7 @@ VALID_STATUS_OUTCOME_PREFIXES = sorted(VALID_STATUS_OUTCOME, key=len, reverse=Tr
 # =========================================================
 
 
+@lru_cache(maxsize=16384)
 def clean_email(email):
     if pd.isna(email) or not email:
         return ''
@@ -156,6 +158,7 @@ def clean_email(email):
     return email if EMAIL_REGEX.match(email) else ''
 
 
+@lru_cache(maxsize=16384)
 def parse_messy_date(x):
     if pd.isna(x) or str(x).strip() == '':
         return ''
@@ -170,6 +173,7 @@ def parse_messy_date(x):
         return ''
 
 
+@lru_cache(maxsize=16384)
 def clean_compliant(x):
     if pd.isna(x):
         return ''
@@ -185,14 +189,20 @@ def clean_compliant(x):
     return ''
 
 
+multiline_cleaner_cache = {}
+
 def multiline_cleaner(x, valid_set, valid_prefixes):
     if pd.isna(x):
         return ''
     x = str(x).upper().replace('\xa0', ' ')
-    x = WHITESPACE_RE.sub(' ', x).strip()
     if x == '':
         return ''
 
+    cache_key = (x, id(valid_set))
+    if cache_key in multiline_cleaner_cache:
+        return multiline_cleaner_cache[cache_key]
+
+    x = WHITESPACE_RE.sub(' ', x).strip()
     if any(x.startswith(prefix) for prefix in valid_prefixes) and not re.match(r'^\d+\.', x):
         x = '1. ' + x
 
@@ -210,12 +220,16 @@ def multiline_cleaner(x, valid_set, valid_prefixes):
         values.append(x)
 
     if not values:
-        return ''
+        result = ''
+    else:
+        values = list(dict.fromkeys(values))
+        result = '\n'.join(f'{i+1}. {val}' for i, val in enumerate(values))
 
-    values = list(dict.fromkeys(values))
-    return '\n'.join(f'{i+1}. {val}' for i, val in enumerate(values))
+    multiline_cleaner_cache[cache_key] = result
+    return result
 
 
+@lru_cache(maxsize=16384)
 def normalize_month(value):
     month_map = {
         'JANUARY': 'JAN',
