@@ -3,6 +3,7 @@ from io import BytesIO
 
 import pandas as pd
 from dateutil import parser
+from openpyxl import Workbook
 
 VALID_SUBMISSION_CATEGORY = {
     'FOB', 'OFR', 'PLC', 'SVC', 'ALL',
@@ -108,6 +109,21 @@ MAPPING_YN = {
     'N': 'NO',
     'NO': 'NO'
 }
+
+REQUIRED_COLUMNS = {
+    'GLOBAL/\nNAC',
+    'NAMED ACCOUNT',
+    'RFQ HANDLED BY',
+    'WWA MEMBER EMAIL ID',
+    'MONTH',
+    'ENTRY COMPLETE YES / NO',
+    'COMPLIANT (YES/NO)',
+    'SUBMISSION CATEGORY',
+    'SUBMISSION SUB-CATEGORY',
+    'ERROR CATEGORY',
+    'STATUS UPDATE/OUTCOME',
+    'PENALTY REPORTED Y/N'
+} | set(DATE_COLUMNS)
 
 EMAIL_REGEX = re.compile(r'^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$')
 WHITESPACE_RE = re.compile(r'\s+')
@@ -220,6 +236,10 @@ def normalize_month(value):
 
 
 def clean_rfq_dataframe(df):
+    for required_col in REQUIRED_COLUMNS:
+        if required_col not in df.columns:
+            df[required_col] = ''
+
     df['GLOBAL/\nNAC'] = df['GLOBAL/\nNAC'].astype(str).str.strip()
     df['NAMED ACCOUNT'] = df['NAMED ACCOUNT'].astype(str).str.strip()
 
@@ -276,7 +296,6 @@ def process_rfq_file(uploaded_file):
         'Kajal', 'Shraddha', 'Sonali',
         'Sachin', 'Rohan', 'Krushna'
     ]
-    all_data = []
     columns = None
 
     xls = pd.ExcelFile(input_buffer, engine='openpyxl')
@@ -284,10 +303,22 @@ def process_rfq_file(uploaded_file):
     if missing_sheets:
         raise ValueError(f'Missing expected sheet(s): {", ".join(missing_sheets)}')
 
+    workbook = Workbook(write_only=True)
+    worksheet = workbook.create_sheet(title='Cleaned RFQ')
+    header_written = False
+
+    file_name = getattr(uploaded_file, 'name', '')
+    if file_name and not file_name.lower().endswith(('.xlsx', '.xlsm', '.xltx', '.xltm')):
+        raise ValueError('Please upload a valid Excel file (.xlsx, .xlsm, .xltx, .xltm).')
+
     for i, sheet in enumerate(sheets):
         if i == 0:
             df = xls.parse(sheet_name=sheet, header=7)
-            columns = list(df.columns)
+            columns = [str(c) if c is not None else '' for c in df.columns]
+            for required_col in REQUIRED_COLUMNS:
+                if required_col not in columns:
+                    columns.append(required_col)
+                    df[required_col] = ''
         else:
             df = xls.parse(sheet_name=sheet, header=None, skiprows=8)
             if df.shape[1] < len(columns):
@@ -296,13 +327,24 @@ def process_rfq_file(uploaded_file):
             elif df.shape[1] > len(columns):
                 df = df.iloc[:, :len(columns)]
             df.columns = columns
+            for required_col in REQUIRED_COLUMNS:
+                if required_col not in df.columns:
+                    df[required_col] = ''
 
         df.dropna(how='all', inplace=True)
-        all_data.append(df)
+        if df.empty:
+            continue
 
-    df = pd.concat(all_data, ignore_index=True)
-    df = clean_rfq_dataframe(df)
+        df = clean_rfq_dataframe(df)
+
+        if not header_written:
+            worksheet.append(columns)
+            header_written = True
+
+        for row in df.itertuples(index=False, name=None):
+            cleaned_row = [None if pd.isna(value) else value for value in row]
+            worksheet.append(cleaned_row)
 
     output_buffer = BytesIO()
-    df.to_excel(output_buffer, index=False, engine='openpyxl')
+    workbook.save(output_buffer)
     return output_buffer.getvalue()
