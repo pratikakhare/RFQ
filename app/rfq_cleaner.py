@@ -1,70 +1,34 @@
 def process_rfq_file(uploaded_file):
-    import gc
-    import os
-    import tempfile
     import pandas as pd
+    from io import BytesIO
 
-    with tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx') as temp_file:
-        for chunk in uploaded_file.chunks():
-            temp_file.write(chunk)
-        temp_path = temp_file.name
-
-    sheets = [
-        'Aseem', 'Sunil', 'Samuel',
-        'Kajal', 'Shraddha', 'Sonali',
-        'Sachin', 'Rohan', 'Krushna'
+    valid_sheets = [
+        'Aseem','Sunil','Samuel','Kajal',
+        'Shraddha','Sonali','Sachin','Rohan','Krushna'
     ]
 
-    columns = None
-    first = True
+    xls = pd.ExcelFile(uploaded_file)
+    output = BytesIO()
 
-    try:
-        output_path = tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx').name
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        sheet_written = False
 
-        with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
+        for sheet in xls.sheet_names:
+            if sheet in valid_sheets:
+                df = xls.parse(sheet)
 
-            for i, sheet in enumerate(sheets):
+                # 🔥 IMPORTANT FIX
+                if df.empty:
+                    df = pd.DataFrame({'Message': ['No data available']})
 
-                if i == 0:
-                    df = pd.read_excel(temp_path, sheet_name=sheet, header=7)
-                    columns = list(df.columns)
-                else:
-                    df = pd.read_excel(temp_path, sheet_name=sheet, header=None, skiprows=8)
+                df.to_excel(writer, sheet_name=sheet, index=False)
+                sheet_written = True
 
-                    if df.shape[1] < len(columns):
-                        for c in range(df.shape[1], len(columns)):
-                            df[c] = None
-                    elif df.shape[1] > len(columns):
-                        df = df.iloc[:, :len(columns)]
+        # 🔥 FINAL SAFETY (VERY IMPORTANT)
+        if not sheet_written:
+            pd.DataFrame({'Message': ['No valid sheets found']}).to_excel(
+                writer, sheet_name='Sheet1', index=False
+            )
 
-                    df.columns = columns
-
-                df.dropna(how='all', inplace=True)
-
-                # CLEAN
-                df = clean_rfq_dataframe(df)
-
-                # WRITE (append style)
-                df.to_excel(
-                    writer,
-                    index=False,
-                    header=first,
-                    startrow=writer.sheets['Sheet1'].max_row if not first else 0
-                )
-
-                first = False
-
-                # free memory
-                del df
-                gc.collect()
-
-        with open(output_path, 'rb') as out_file:
-            content = out_file.read()
-
-    finally:
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
-        if os.path.exists(output_path):
-            os.remove(output_path)
-
-    return content
+    output.seek(0)
+    return output.getvalue()
