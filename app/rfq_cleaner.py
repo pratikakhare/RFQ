@@ -222,7 +222,6 @@ def multiline_cleaner(x, valid_set, valid_prefixes):
     if not values:
         result = ''
     else:
-        values = list(dict.fromkeys(values))
         result = '\n'.join(f'{i+1}. {val}' for i, val in enumerate(values))
 
     multiline_cleaner_cache[cache_key] = result
